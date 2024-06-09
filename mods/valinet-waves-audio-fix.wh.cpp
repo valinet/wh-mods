@@ -1,7 +1,7 @@
 // ==WindhawkMod==
 // @id              valinet-waves-audio-fix
 // @name            Waves Audio Fix
-// @description     Fix crash of audio service due to Waves Audio under certain setups, like running on Windows Server OS.
+// @description     Fix crash of audio service due to Waves Audio under certain setups, like running Windows Server OS.
 // @version         0.1
 // @author          valinet
 // @github          https://github.com/valinet
@@ -12,7 +12,7 @@
 // ==WindhawkModReadme==
 /*
 # Waves Audio Fix
-Fix crash of audio service due to Waves Audio under certain setups, like running on Windows Server OS.
+Fix crash of audio service due to Waves Audio under certain setups, like running Windows Server OS.
 */
 // ==/WindhawkModReadme==
 
@@ -50,7 +50,8 @@ LONG NTAPI OnVex(PEXCEPTION_POINTERS ExceptionInfo) {
 // The mod is being initialized, load settings, hook functions, and do other
 // initialization stuff if required.
 BOOL Wh_ModInit() {
-    Wh_Log(L"Init: %p\n", pHandler = AddVectoredExceptionHandler(true, OnVex));
+    pHandler = AddVectoredExceptionHandler(true, OnVex);
+    Wh_Log(L"Init: %p\n", pHandler);
     return TRUE;
 }
 

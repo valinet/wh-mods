@@ -166,12 +166,6 @@ BOOL IsWindowsServerHook() {
     return FALSE;
 }
 
-BOOL(*SetEventFunc)(HANDLE hEvent) = nullptr;
-BOOL SetEventHook(HANDLE hEvent) {
-    Wh_Log(L"SetEvent %p\n", hEvent);
-    return SetEventFunc(hEvent);
-}
-
 void PatchKUserSharedDataAccesses() {
     // This function tries to redirect memory reads of KUSER_SHARED_DATA
     // KUSER_SHARED_DATA is a section mapped into all processes at a fixed
@@ -289,7 +283,6 @@ BOOL Wh_ModInit() {
             CloseHandle(hFirstThread);
         }).detach();
     }
-    Wh_SetFunctionHook(reinterpret_cast<void*>(&SetEvent), reinterpret_cast<void*>(&SetEventHook), reinterpret_cast<void**>(&SetEventFunc));
     Wh_SetFunctionHook(reinterpret_cast<void*>(&RegQueryValueExW), reinterpret_cast<void*>(&RegQueryValueExWHook), reinterpret_cast<void**>(&RegQueryValueExWFunc));
     Wh_SetFunctionHook(reinterpret_cast<void*>(&GetVersionExW), reinterpret_cast<void*>(&GetVersionExWHook), reinterpret_cast<void**>(&GetVersionExFunc));
     Wh_SetFunctionHook(reinterpret_cast<void*>(&IsOS), reinterpret_cast<void*>(&IsOSHook), reinterpret_cast<void**>(&IsOSFunc));
@@ -299,7 +292,6 @@ BOOL Wh_ModInit() {
 }
 
 void Wh_ModUninit() {
-    if (SetEventFunc) Wh_RemoveFunctionHook(reinterpret_cast<void*>(&SetEvent));
     if (RegQueryValueExWFunc) Wh_RemoveFunctionHook(reinterpret_cast<void*>(&RegQueryValueExW));
     if (GetVersionExFunc) Wh_RemoveFunctionHook(reinterpret_cast<void*>(&GetVersionExW));
     if (IsOSFunc) Wh_RemoveFunctionHook(reinterpret_cast<void*>(&IsOS));
