@@ -6,10 +6,17 @@
 // @author          valinet
 // @github          https://github.com/valinet
 // @homepage        https://valinet.ro
+// @include         RuntimeBroker.exe
 // @include         taskmgr.exe
 // @include         disk_image.exe
 // @compilerOptions -lshlwapi
 // ==/WindhawkMod==
+
+#include <vector>
+#include <string>
+std::vector<std::wstring> runtimeBrokerHooksPackageName = {
+    std::wstring(L"microsoft.windows.startmenuexperiencehost")
+};
 
 // ==WindhawkModReadme==
 /*
@@ -18,6 +25,7 @@ Make server OS report as client OS for specific apps.
 */
 // ==/WindhawkModReadme==
 
+#include <debugapi.h>
 #include <handleapi.h>
 #include <libloaderapi.h>
 #include <memoryapi.h>
@@ -27,6 +35,7 @@ Make server OS report as client OS for specific apps.
 #include <windhawk_api.h>
 #include <winnt.h>
 #include <versionhelpers.h>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <psapi.h>
@@ -230,6 +239,41 @@ BOOL Wh_ModInit() {
 #endif
     bool isInitialThread = *(USHORT*)((BYTE*)NtCurrentTeb() + OFFSET_SAME_TEB_FLAGS) & 0x0400;
     Wh_Log(L"isInitialThread=%d", isInitialThread);
+    wchar_t wszMyPath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, wszMyPath, MAX_PATH);
+    auto wszMyExeName = wcsrchr(wszMyPath, L'\\');
+    if (wszMyExeName && !wcsicmp(wszMyExeName, L"\\RuntimeBroker.exe")) {
+        bool ok = false;
+        HMODULE hNtDll = GetModuleHandleW(L"ntdll.dll");
+        if (hNtDll) {
+            auto RtlQueryPackageIdentity = GetProcAddress(hNtDll, "RtlQueryPackageIdentity");
+            if (RtlQueryPackageIdentity) {
+                HANDLE hProcess = GetCurrentProcess();
+                if (hProcess) {
+                    HANDLE hToken = INVALID_HANDLE_VALUE;
+                    OpenProcessToken(hProcess, TOKEN_QUERY, &hToken);
+                    if (hToken && hToken != INVALID_HANDLE_VALUE) {
+                        SIZE_T dwPackageName = MAX_PATH;
+                        wchar_t wszPackageName[MAX_PATH]{};
+                        BOOLEAN bIsPackaged = FALSE;
+                        int rv = ((int(*)(HANDLE, PWSTR, PSIZE_T, PWSTR, PSIZE_T, PBOOLEAN))RtlQueryPackageIdentity)(hToken, wszPackageName, &dwPackageName, nullptr, nullptr, &bIsPackaged);
+                        if (rv == 0 && bIsPackaged) {
+                            for (wchar_t* p = wszPackageName; *p != L'\0'; ++p) if (p[0] >= L'A' && p[0] <= L'Z') p[0] += (L'a' - L'A');
+                            for (auto& packageName : runtimeBrokerHooksPackageName) {
+                                if (!wcsncmp(wszPackageName, packageName.c_str(), packageName.length())) {
+                                    ok = true;
+                                    break;
+                                }
+                            }
+                        }
+                        CloseHandle(hToken);
+                    }
+                    CloseHandle(hProcess);
+                }
+            }
+        }
+        if (!ok) return FALSE;
+    }
     auto isUpxCompressed = [](){
         HMODULE hModule = GetModuleHandleW(nullptr);
         if (hModule) {
