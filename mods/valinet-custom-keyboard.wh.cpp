@@ -6,6 +6,7 @@
 // @author          valinet
 // @github          https://github.com/valinet
 // @include         windhawk.exe
+// @compilerOptions -lWtsapi32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
@@ -25,6 +26,8 @@ Hackish way to have different customized key mappings for each physical keyboard
 #include <sysinfoapi.h>
 #include <tlhelp32.h>
 #include <hidsdi.h>
+#include <winerror.h>
+#include <wtsapi32.h>
 
 #define ID_KB_LAPTOP  0x777528c4
 #define ID_KB_DESKTOP 0x86893132
@@ -125,10 +128,40 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int nCmdShow) {
+    int rv = 0xFFFFFFFF;
+
+    SECURITY_DESCRIPTOR sd;
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, true, nullptr, false);
+    SECURITY_ATTRIBUTES sa = { };
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = false;
+    sa.lpSecurityDescriptor = &sd;
+    SetLastError(ERROR_SUCCESS);
+    HANDLE mutSingleInstance = CreateMutexW(&sa, false, L"Global\\{4B360CA7-967F-4FA2-BC4A-885F1106ACB0}");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(mutSingleInstance);
+        return ERROR_ALREADY_EXISTS;
+    }
+
     MSG msg;
     PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
     wchar_t wszMsg[MAX_PATH * 4];
     currentKeyboard.id = ID_KB_LAPTOP;
+
+    BOOL bRegisteredForWTS = WTSRegisterSessionNotification(hWnd, NOTIFY_FOR_ALL_SESSIONS);
+    swprintf_s(wszMsg, L"WTSRegisterSessionNotification: %d\n", bRegisteredForWTS);
+    Wh_Log_External(wszMsg);
+
+    DWORD dwProcessSessionId = 0xFFFFFFFF, dwActiveSessionId = WTSGetActiveConsoleSessionId();
+    ProcessIdToSessionId(GetCurrentProcessId(), &dwProcessSessionId);
+    if (dwActiveSessionId != 0xFFFFFFFF && dwProcessSessionId != dwActiveSessionId) {
+        swprintf_s(wszMsg, L"Did not start in active session, exiting...\n");
+        Wh_Log_External(wszMsg);
+        if (bRegisteredForWTS) WTSUnRegisterSessionNotification(hWnd);
+        if (mutSingleInstance) CloseHandle(mutSingleInstance);
+        return rv;
+    }
 
     HHOOK hHook = SetWindowsHookExW(WH_KEYBOARD_LL, &LowLevelKeyboardProc, hInstance, 0);
     swprintf_s(wszMsg, L"SetWindowsHookExW: %d\n", hHook);
@@ -150,7 +183,7 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
 
     while (true) {
         bool isQuiting = false;
-        auto rv = MsgWaitForMultipleObjects(0, nullptr, false, INFINITE, QS_ALLINPUT);
+        rv = MsgWaitForMultipleObjects(0, nullptr, false, INFINITE, QS_ALLINPUT);
         if (rv != WAIT_OBJECT_0) break;
         UINT64 rawBuffer[1024 / 8];
         UINT bytes = sizeof(rawBuffer);
@@ -192,8 +225,20 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
         }
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
+                swprintf_s(wszMsg, L"Quitting (WM_QUIT)...\n");
+                Wh_Log_External(wszMsg);
+                rv = 0xFFFFFFFF;
                 isQuiting = true;
                 break;
+            }
+            else if (msg.message == WM_WTSSESSION_CHANGE) {
+                if (msg.wParam == WTS_CONSOLE_CONNECT || msg.wParam == WTS_SESSION_LOGOFF) {
+                    swprintf_s(wszMsg, L"Quitting (WM_WTSSESSION_CHANGE, %d, %d)...\n", msg.wParam, msg.lParam);
+                    Wh_Log_External(wszMsg);
+                    rv = msg.lParam;
+                    isQuiting = true;
+                    break;
+                }
             }
             else {
                 TranslateMessage(&msg);
@@ -205,7 +250,9 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
 
     if (hHid) FreeLibrary(hHid);
     if (hHook) UnhookWindowsHookEx(hHook);
-    return 0;
+    if (bRegisteredForWTS) WTSUnRegisterSessionNotification(hWnd);
+    if (mutSingleInstance) CloseHandle(mutSingleInstance);
+    ExitProcess(rv);
 }
 
 DWORD WINAPI procClose(LPVOID dwMainTid) {
@@ -213,73 +260,102 @@ DWORD WINAPI procClose(LPVOID dwMainTid) {
 }
 
 PROCESS_INFORMATION pi{};
+std::mutex mut_pi;
+std::thread worker;
 
 BOOL Wh_ModInit() {
     bool isSystemAccount = IsLocalSystem();
+    Wh_Log_Original(L"Init %d\n", isSystemAccount);
     if (isSystemAccount) {
-        wchar_t wszPath[MAX_PATH];
-        GetWindowsDirectory(wszPath, MAX_PATH);
-        wchar_t wszArguments[MAX_PATH]{};
-        GetModuleFileNameW(HINST_THISCOMPONENT, wszArguments, MAX_PATH);
-        wchar_t wszCommand[MAX_PATH * 3];
-        BOOL amI32Bit = FALSE;
-        if (!IsWow64Process(GetCurrentProcess(), &amI32Bit) || amI32Bit) swprintf_s(wszCommand, L"\"%s\\SysWOW64\\rundll32.exe\" %s,procMain", wszPath, wszArguments);
-        else swprintf_s(wszCommand, L"\"%s\\System32\\rundll32.exe\" %s,procMain", wszPath, wszArguments);
-        Wh_Log_Original(L"%s\n", wszCommand);
-        HANDLE procInteractiveWinlogon = INVALID_HANDLE_VALUE;
-        PROCESSENTRY32 entry;
-        entry.dwSize = sizeof(PROCESSENTRY32);
-        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (hSnapshot) {
-            if (Process32First(hSnapshot, &entry) == TRUE) {
-                DWORD dwActiveSessionId = WTSGetActiveConsoleSessionId();
-                while (Process32Next(hSnapshot, &entry) == TRUE) {
-                    if (!wcsicmp(entry.szExeFile, L"winlogon.exe")) {
-                        DWORD dwWinLogonSessionId = -1;
-                        ProcessIdToSessionId(entry.th32ProcessID, &dwWinLogonSessionId);
-                        if (dwActiveSessionId == dwWinLogonSessionId) {
-                            if ((procInteractiveWinlogon = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID))) {
-                                BOOL bIs32Bit = FALSE;
-                                if (!IsWow64Process(procInteractiveWinlogon, &bIs32Bit) || bIs32Bit) {
-                                    CloseHandle(procInteractiveWinlogon);
-                                    procInteractiveWinlogon = INVALID_HANDLE_VALUE;
-                                    continue;
+        mut_pi.lock();
+        worker = std::thread([](){
+            Wh_Log_Original(L"Started worker.\n");
+            while (true) {
+                wchar_t wszPath[MAX_PATH];
+                GetWindowsDirectory(wszPath, MAX_PATH);
+                wchar_t wszArguments[MAX_PATH]{};
+                GetModuleFileNameW(HINST_THISCOMPONENT, wszArguments, MAX_PATH);
+                wchar_t wszCommand[MAX_PATH * 3];
+                BOOL amI32Bit = FALSE;
+                if (!IsWow64Process(GetCurrentProcess(), &amI32Bit) || amI32Bit) swprintf_s(wszCommand, L"\"%s\\SysWOW64\\rundll32.exe\" %s,procMain", wszPath, wszArguments);
+                else swprintf_s(wszCommand, L"\"%s\\System32\\rundll32.exe\" %s,procMain", wszPath, wszArguments);
+                Wh_Log_Original(L"%s\n", wszCommand);
+                HANDLE procInteractiveWinlogon = INVALID_HANDLE_VALUE;
+                PROCESSENTRY32 entry;
+                entry.dwSize = sizeof(PROCESSENTRY32);
+                HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if (hSnapshot) {
+                    if (Process32First(hSnapshot, &entry) == TRUE) {
+                        DWORD dwActiveSessionId = WTSGetActiveConsoleSessionId();
+                        if (dwActiveSessionId == 0xFFFFFFFF) {
+                            Wh_Log_Original(L"No session is active.\n");
+                        }
+                        while (Process32Next(hSnapshot, &entry) == TRUE) {
+                            if (!wcsicmp(entry.szExeFile, L"winlogon.exe")) {
+                                DWORD dwWinLogonSessionId = 0xFFFFFFFF;
+                                ProcessIdToSessionId(entry.th32ProcessID, &dwWinLogonSessionId);
+                                if (dwActiveSessionId == 0xFFFFFFFF || dwActiveSessionId == dwWinLogonSessionId) {
+                                    if ((procInteractiveWinlogon = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID))) {
+                                        BOOL bIs32Bit = FALSE;
+                                        if (!IsWow64Process(procInteractiveWinlogon, &bIs32Bit) || bIs32Bit) {
+                                            CloseHandle(procInteractiveWinlogon);
+                                            procInteractiveWinlogon = INVALID_HANDLE_VALUE;
+                                            continue;
+                                        }
+                                        break;
+                                    }
                                 }
-                                break;
                             }
                         }
                     }
+                    CloseHandle(hSnapshot);
+                }
+                Wh_Log_Original(L"procInteractiveWinlogon: %p\n", procInteractiveWinlogon);
+                HANDLE tknInteractive = INVALID_HANDLE_VALUE;
+                if (procInteractiveWinlogon && procInteractiveWinlogon != INVALID_HANDLE_VALUE) {
+                    HANDLE tknWinlogon = INVALID_HANDLE_VALUE;
+                    if (OpenProcessToken(procInteractiveWinlogon, TOKEN_DUPLICATE, &tknWinlogon) && tknWinlogon && tknWinlogon != INVALID_HANDLE_VALUE) {
+                        SECURITY_ATTRIBUTES tokenAttributes;
+                        ZeroMemory(&tokenAttributes, sizeof(SECURITY_ATTRIBUTES));
+                        tokenAttributes.nLength = sizeof(SECURITY_ATTRIBUTES);
+                        DuplicateTokenEx(tknWinlogon, 0x10000000, &tokenAttributes, SecurityImpersonation, TokenImpersonation, &tknInteractive);
+                        CloseHandle(tknWinlogon);
+                    }
+                    CloseHandle(procInteractiveWinlogon);
+                }
+                Wh_Log_Original(L"tknInteractive: %p\n", tknInteractive);
+                if (tknInteractive && tknInteractive != INVALID_HANDLE_VALUE) {
+                    STARTUPINFO si{};
+                    si.cb = sizeof(si);
+                    si.lpDesktop = (LPWSTR)L"WinSta0\\Default";
+                    CreateProcessAsUserW(tknInteractive, nullptr, wszCommand, nullptr, nullptr, false, INHERIT_CALLER_PRIORITY,  nullptr, nullptr, &si, &pi);
+                    CloseHandle(tknInteractive);
+                    mut_pi.unlock();
+                    WaitForSingleObject(pi.hProcess, INFINITE);
+                    mut_pi.lock();
+                    DWORD dwExitCode = -1;
+                    GetExitCodeProcess(pi.hProcess, &dwExitCode);
+                    Wh_Log_Original(L"Exited process with %d.\n", dwExitCode);
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    if (dwExitCode == 0xFFFFFFFF) {
+                        mut_pi.unlock();
+                        break;
+                    }
+                    Sleep(1000);
+                } else {
+                    mut_pi.unlock();
+                    break;
                 }
             }
-            CloseHandle(hSnapshot);
-        }
-        Wh_Log_Original(L"procInteractiveWinlogon: %p\n", procInteractiveWinlogon);
-        HANDLE tknInteractive = INVALID_HANDLE_VALUE;
-        if (procInteractiveWinlogon && procInteractiveWinlogon != INVALID_HANDLE_VALUE) {
-            HANDLE tknWinlogon = INVALID_HANDLE_VALUE;
-            if (OpenProcessToken(procInteractiveWinlogon, TOKEN_DUPLICATE, &tknWinlogon) && tknWinlogon && tknWinlogon != INVALID_HANDLE_VALUE) {
-                SECURITY_ATTRIBUTES tokenAttributes;
-                ZeroMemory(&tokenAttributes, sizeof(SECURITY_ATTRIBUTES));
-                tokenAttributes.nLength = sizeof(SECURITY_ATTRIBUTES);
-                DuplicateTokenEx(tknWinlogon, 0x10000000, &tokenAttributes, SecurityImpersonation, TokenImpersonation, &tknInteractive);
-                CloseHandle(tknWinlogon);
-            }
-            CloseHandle(procInteractiveWinlogon);
-        }
-        Wh_Log_Original(L"tknInteractive: %p\n", tknInteractive);
-        if (tknInteractive && tknInteractive != INVALID_HANDLE_VALUE) {
-            STARTUPINFO si{};
-    		si.cb = sizeof(si);
-            si.lpDesktop = (LPWSTR)L"WinSta0\\Default";
-            CreateProcessAsUserW(tknInteractive, nullptr, wszCommand, nullptr, nullptr, false, INHERIT_CALLER_PRIORITY,  nullptr, nullptr, &si, &pi);
-            CloseHandle(tknInteractive);
-        }
+        });
+        return TRUE;
     }
-    Wh_Log_Original(L"Init %d\n", isSystemAccount);
-    return TRUE;
+    return FALSE;
 }
 
 void Wh_ModUninit() {
+    mut_pi.lock();
     if (pi.hThread) {
         HANDLE hThread = CreateRemoteThread(pi.hProcess, nullptr, 0, &procClose, reinterpret_cast<LPVOID>(GetThreadId(pi.hThread)), 0, nullptr);
         if (hThread) {
@@ -288,14 +364,11 @@ void Wh_ModUninit() {
             Wh_Log_Original(L"Exited thread with %d.\n", dwExitCode);
             CloseHandle(hThread);
         }
-        CloseHandle(pi.hThread);
     }
-    if (pi.hProcess) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        DWORD dwExitCode = 1;
-        GetExitCodeProcess(pi.hProcess, &dwExitCode);
-        Wh_Log_Original(L"Exited process with %d.\n", dwExitCode);
-        CloseHandle(pi.hProcess);
+    mut_pi.unlock();
+    if (worker.native_handle()) {
+        worker.join();
+        Wh_Log_Original(L"Ended worker.\n");
     }
     Wh_Log_Original(L"Uninit");
 }
