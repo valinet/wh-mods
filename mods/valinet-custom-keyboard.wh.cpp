@@ -163,7 +163,8 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
         return rv;
     }
 
-    HHOOK hHook = SetWindowsHookExW(WH_KEYBOARD_LL, &LowLevelKeyboardProc, hInstance, 0);
+    HHOOK hHook = nullptr;
+    hHook = SetWindowsHookExW(WH_KEYBOARD_LL, &LowLevelKeyboardProc, hInstance, 0);
     swprintf_s(wszMsg, L"SetWindowsHookExW: %d\n", hHook);
     Wh_Log_External(wszMsg);
 
@@ -175,7 +176,8 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
     swprintf_s(wszMsg, L"RegisterRawInputDevices: %d\n", RegisterRawInputDevices(&rid, 1, sizeof(rid)));
     Wh_Log_External(wszMsg);
 
-    HMODULE hHid = LoadLibraryW(L"Hid.dll");
+    HMODULE hHid = nullptr;
+	hHid = LoadLibraryW(L"Hid.dll");
     BOOLEAN WINAPI (*HidD_GetProductStringFunc)(HANDLE, PVOID, ULONG) = nullptr;
     if (hHid) HidD_GetProductStringFunc = reinterpret_cast<BOOLEAN WINAPI (*)(HANDLE, PVOID, ULONG)>(GetProcAddress(hHid, "HidD_GetProductString"));
     swprintf_s(wszMsg, L"HidD_GetProductStringFunc: %p\n", HidD_GetProductStringFunc);
@@ -206,7 +208,7 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
                                 keyboard.friendlyName = std::wstring(wszProductString);
                                 keyboards.insert({ raw->header.hDevice, keyboard });
                                 swprintf_s(wszMsg, L">>> adding %x, %x\n", raw->header.hDevice, keyboard.id);// : %x <> %s , %s\n", raw->header.hDevice, keyboard.id, keyboard.friendlyName.c_str(), keyboard.hardwareId.c_str());
-                                OutputDebugString(wszMsg);
+                                Wh_Log_External(wszMsg);
                                 CloseHandle(HIDHandle);
                             }
                         }
