@@ -129,7 +129,20 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
                                                 VARIANT varOperation;
                                                 varOperation.vt = VT_BSTR;
                                                 varOperation.bstrVal = bstrOperation;                                            
-                                                psd->ShellExecuteW(bstrExe, vEmpty, vEmpty, varOperation, vEmpty);
+                                                hr = psd->ShellExecuteW(bstrExe, vEmpty, vEmpty, varOperation, vEmpty);
+                                                if (SUCCEEDED(hr)) {
+                                                    auto start = GetTickCount64();
+                                                    HWND hWnd = nullptr;
+                                                    while (GetClassWord(hWnd = GetForegroundWindow(), GCW_ATOM) != RegisterWindowMessageW(L"CalcFrame")) {
+                                                        SleepEx(0, true);
+                                                        if (GetTickCount64() - start > 1000) break;
+                                                    }
+                                                    POINT pt{};
+                                                    GetCursorPos(&pt);
+                                                    RECT rc{};
+                                                    GetWindowRect(hWnd, &rc);
+                                                    SetWindowPos(hWnd, nullptr, pt.x - ((rc.right - rc.left) / 2), pt.y - ((rc.bottom - rc.top) / 2), 0, 0, SWP_NOSIZE);
+                                                }
                                             }
                                             if (bstrExe) SysFreeString(bstrExe);
                                             if (bstrOperation) SysFreeString(bstrOperation);
