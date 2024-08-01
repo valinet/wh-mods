@@ -40,6 +40,7 @@ bool patch(char* pAddr, const wchar_t* wszModule, int pEquals) {
 
 LONG NTAPI OnVex(PEXCEPTION_POINTERS ExceptionInfo) {
     if (ExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_ACCESS_VIOLATION && (
+	    patch(reinterpret_cast<char*>(ExceptionInfo->ExceptionRecord->ExceptionAddress), L"MaxxAudioRenderAVX64.dll", 0x157c47) ||
         patch(reinterpret_cast<char*>(ExceptionInfo->ExceptionRecord->ExceptionAddress), L"MaxxAudioRender64.dll", 0x15c787) ||
         patch(reinterpret_cast<char*>(ExceptionInfo->ExceptionRecord->ExceptionAddress), L"MaxxAudioCapture64.dll", 0x11618a))) {
         return EXCEPTION_CONTINUE_EXECUTION;
