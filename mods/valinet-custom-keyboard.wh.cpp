@@ -42,6 +42,7 @@ Hackish way to have different customized key mappings for each physical keyboard
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 #define HINST_THISCOMPONENT ((HINSTANCE)&__ImageBase)
+BOOL(CALLBACK *IsTopLevelWindow)(HWND) = nullptr;
 
 uint32_t generateIdFromWString(std::wstring& str) {
     unsigned int h;
@@ -128,6 +129,14 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
+void CALLBACK Wineventproc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD idEventThread, DWORD dwmsEventTime) {
+    if (((event == EVENT_OBJECT_CREATE) && hwnd && idObject == OBJID_WINDOW) || ((event == EVENT_SYSTEM_FOREGROUND) && hwnd && (idObject == OBJID_WINDOW) && IsTopLevelWindow && IsTopLevelWindow(hwnd))) {
+        if (RegisterWindowMessageW(L"TscShellContainerClass") == GetClassWord(hwnd, GCW_ATOM)) {
+            PostThreadMessageW(GetCurrentThreadId(), WM_USER, 0, 0);
+        }
+    }
+}
+
 extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int nCmdShow) {
     int rv = 0xFFFFFFFF;
 
@@ -164,9 +173,21 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
         ExitProcess(rv);
     }
 
+    if (!IsTopLevelWindow) {
+        HMODULE hUser32 = GetModuleHandleW(L"user32");
+        if (hUser32) {
+            IsTopLevelWindow = reinterpret_cast<BOOL(*CALLBACK)(HWND)>(GetProcAddress(hUser32, "IsTopLevelWindow"));
+        };
+    }
+
     HHOOK hHook = nullptr;
     hHook = SetWindowsHookExW(WH_KEYBOARD_LL, &LowLevelKeyboardProc, hInstance, 0);
     swprintf_s(wszMsg, L"SetWindowsHookExW: %d\n", hHook);
+    Wh_Log_External(wszMsg);
+
+    HWINEVENTHOOK hWinEventHook = nullptr;
+    hWinEventHook = SetWinEventHook(EVENT_MIN, EVENT_MAX, nullptr, &Wineventproc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    swprintf_s(wszMsg, L"SetWinEventHook: %d\n", hWinEventHook);
     Wh_Log_External(wszMsg);
 
     RAWINPUTDEVICE rid{};
@@ -184,10 +205,16 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
     swprintf_s(wszMsg, L"HidD_GetProductStringFunc: %p\n", HidD_GetProductStringFunc);
     Wh_Log_External(wszMsg);
 
+    DWORD dwWait = INFINITE;
     while (true) {
         bool isQuiting = false;
-        rv = MsgWaitForMultipleObjects(0, nullptr, false, INFINITE, QS_ALLINPUT);
-        if (rv != WAIT_OBJECT_0) break;
+        rv = MsgWaitForMultipleObjects(0, nullptr, false, dwWait, QS_ALLINPUT);
+        if (rv != WAIT_OBJECT_0 && rv != WAIT_TIMEOUT) break;
+        if (rv == WAIT_TIMEOUT) {
+            if (hHook) UnhookWindowsHookEx(hHook);
+            hHook = SetWindowsHookExW(WH_KEYBOARD_LL, &LowLevelKeyboardProc, hInstance, 0);
+            dwWait = INFINITE;
+        }
         UINT64 rawBuffer[1024 / 8];
         UINT bytes = sizeof(rawBuffer);
         auto count = GetRawInputBuffer((PRAWINPUT)rawBuffer, &bytes, sizeof(RAWINPUTHEADER));
@@ -243,6 +270,9 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
                     break;
                 }
             }
+            else if (msg.message == WM_USER) {
+                dwWait = 100;
+            }
             else {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -252,6 +282,7 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
     }
 
     if (hHid) FreeLibrary(hHid);
+    if (hWinEventHook) UnhookWinEvent(hWinEventHook);
     if (hHook) UnhookWindowsHookEx(hHook);
     if (bRegisteredForWTS) WTSUnRegisterSessionNotification(hWnd);
     if (mutSingleInstance) CloseHandle(mutSingleInstance);
