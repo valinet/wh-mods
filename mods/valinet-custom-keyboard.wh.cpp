@@ -28,6 +28,7 @@ Hackish way to have different customized key mappings for each physical keyboard
 #include <hidsdi.h>
 #include <winerror.h>
 #include <wtsapi32.h>
+#include <unordered_map>
 
 #define ID_KB_LAPTOP  0x777528c4
 #define ID_KB_DESKTOP 0x86893132
