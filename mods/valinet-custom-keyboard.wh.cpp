@@ -341,11 +341,8 @@ BOOL Wh_ModInit() {
                     Wh_Log_Original(L"Exited process with %d.\n", dwExitCode);
                     CloseHandle(pi.hThread);
                     CloseHandle(pi.hProcess);
-                    if (dwExitCode == 0xFFFFFFFF) {
-                        mut_pi.unlock();
-                        break;
-                    }
-                    Sleep(1000);
+					mut_pi.unlock();
+					break;
                 } else {
                     mut_pi.unlock();
                     break;
