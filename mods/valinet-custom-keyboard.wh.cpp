@@ -142,7 +142,7 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
     HANDLE mutSingleInstance = CreateMutexW(&sa, false, L"Global\\{4B360CA7-967F-4FA2-BC4A-885F1106ACB0}");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(mutSingleInstance);
-        return ERROR_ALREADY_EXISTS;
+        ExitProcess(ERROR_ALREADY_EXISTS);
     }
 
     MSG msg;
@@ -161,7 +161,7 @@ extern "C" int procMain(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int n
         Wh_Log_External(wszMsg);
         if (bRegisteredForWTS) WTSUnRegisterSessionNotification(hWnd);
         if (mutSingleInstance) CloseHandle(mutSingleInstance);
-        return rv;
+        ExitProcess(rv);
     }
 
     HHOOK hHook = nullptr;
