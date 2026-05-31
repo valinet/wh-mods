@@ -62,8 +62,7 @@ bool triggered = false;
 bool shouldHide = false;
 IDispatch* explorers[10]{};
 HWND g_trayHwnd = nullptr;
-UINT g_trayID = 0;
-UINT g_trayCallbackMsg = 0;
+HWND g_trayEnvelopeHwnd = nullptr;
 ITaskbarList* pTaskbar = nullptr;
 
 const CLSID CLSID_OutlookApplication = {
@@ -235,7 +234,9 @@ void OpenMailboxInNewWindow(int slot, LPCWSTR accountName) {
 LRESULT CALLBACK TraySubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, DWORD_PTR dwRefData) {
     if (uMsg == WM_NCDESTROY) {
         WindhawkUtils::RemoveWindowSubclassFromAnyThread(hWnd, TraySubclassProc);
-    } else if (uMsg == g_trayCallbackMsg && g_trayCallbackMsg != 0 && wParam == 0x3039 && lParam == 0x202 && settings.toggleStateTray) {
+    } else if (settings.toggleStateTray && 
+               ((hWnd == g_trayHwnd && uMsg == 1026 && wParam == 0x3039 && lParam == 0x202) ||
+                (hWnd == g_trayEnvelopeHwnd && uMsg == 1068 && wParam == 0 && lParam == 0x202))) {
         //Wh_Log(L"tray callback: uMsg=0x%04X wp=0x%llX lp=0x%llX", uMsg, wParam, lParam);
         if (IsWindowVisible(hOutlookWnd)) {
             ShowWindow(hOutlookWnd, SW_HIDE);
@@ -251,13 +252,14 @@ LRESULT CALLBACK TraySubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
 using Shell_NotifyIconW_t = decltype(&Shell_NotifyIconW);
 Shell_NotifyIconW_t Shell_NotifyIconW_orig;
 BOOL WINAPI Shell_NotifyIconW_hook(DWORD dwMessage, NOTIFYICONDATAW* lpData) {
-    if ((dwMessage == NIM_ADD || dwMessage == NIM_MODIFY) && !g_trayHwnd) {
-        if (lpData->hWnd && WindhawkUtils::SetWindowSubclassFromAnyThread(lpData->hWnd, TraySubclassProc, 0))
-            g_trayHwnd = lpData->hWnd;    
-        g_trayID = lpData->uID;
-        g_trayCallbackMsg = lpData->uCallbackMessage;
-        Wh_Log(L"Tray icon: hWnd=%p uID=%d", g_trayHwnd, g_trayID);
+    if (!g_trayHwnd && lpData->uID == 12345 && (dwMessage == NIM_ADD || dwMessage == NIM_MODIFY) && 
+        lpData->hWnd && WindhawkUtils::SetWindowSubclassFromAnyThread(lpData->hWnd, TraySubclassProc, 0)) {
+        g_trayHwnd = lpData->hWnd;    
+    } else if (!g_trayEnvelopeHwnd && lpData->uID == 0 && (dwMessage == NIM_ADD || dwMessage == NIM_MODIFY) && 
+        lpData->hWnd && WindhawkUtils::SetWindowSubclassFromAnyThread(lpData->hWnd, TraySubclassProc, 0)) {
+        g_trayEnvelopeHwnd = lpData->hWnd;    
     }
+    Wh_Log(L"Tray icon: hWnd=%p uID=%d uCallbackMessage=%d", lpData->hWnd, lpData->uID, lpData->uCallbackMessage);
     return Shell_NotifyIconW_orig(dwMessage, lpData);
 }
 
@@ -265,9 +267,8 @@ using TrackPopupMenuEx_t = decltype(&TrackPopupMenuEx);
 TrackPopupMenuEx_t TrackPopupMenuEx_orig;
 BOOL WINAPI TrackPopupMenuEx_hook(HMENU hMenu, UINT uFlags, int x, int y,
                                    HWND hWnd, LPTPMPARAMS lptpm) {
-    if (hWnd != g_trayHwnd) {
+    if (hWnd != g_trayHwnd && hWnd != g_trayEnvelopeHwnd)
         return TrackPopupMenuEx_orig(hMenu, uFlags, x, y, hWnd, lptpm);
-    }
 
     if (settings.quitInTray) {
         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
@@ -292,6 +293,18 @@ BOOL WINAPI TrackPopupMenuEx_hook(HMENU hMenu, UINT uFlags, int x, int y,
         }
     }
     return (origFlags & TPM_RETURNCMD) ? result : TRUE;
+}
+
+using TrackPopupMenu_t = decltype(&TrackPopupMenu);
+TrackPopupMenu_t TrackPopupMenu_orig;
+BOOL WINAPI TrackPopupMenu_hook(HMENU hMenu, UINT uFlags, int x, int y,
+                                 int nReserved, HWND hWnd, const RECT* prcRect) {
+    if (hWnd != g_trayEnvelopeHwnd)
+        return TrackPopupMenu_orig(hMenu, uFlags, x, y, nReserved, hWnd, prcRect);
+
+    TPMPARAMS tpm = { sizeof(tpm) };
+    if (prcRect) tpm.rcExclude = *prcRect;
+    return TrackPopupMenuEx_hook(hMenu, uFlags, x, y, hWnd, prcRect ? &tpm : nullptr);
 }
 
 void CloakTaskbarWindow(HWND hWnd) {
@@ -442,6 +455,7 @@ BOOL Wh_ModInit() {
     }
     Wh_SetFunctionHook((void*)Shell_NotifyIconW, (void*)Shell_NotifyIconW_hook, (void**)&Shell_NotifyIconW_orig);
     Wh_SetFunctionHook((void*)TrackPopupMenuEx, (void*)TrackPopupMenuEx_hook, (void**)&TrackPopupMenuEx_orig);
+    Wh_SetFunctionHook((void*)TrackPopupMenu, (void*)TrackPopupMenu_hook, (void**)&TrackPopupMenu_orig);
 
     if (settings.hideWhenStartedMinimized) {
         STARTUPINFOW si = { sizeof(si) };
@@ -463,6 +477,8 @@ BOOL Wh_ModInit() {
 void Wh_ModUninit() {
     Wh_Log(L"Uninit");
 
+    if (TrackPopupMenu_orig)
+        Wh_RemoveFunctionHook((void*)TrackPopupMenu);
     if (TrackPopupMenuEx_orig)
         Wh_RemoveFunctionHook((void*)TrackPopupMenuEx);
     if (Shell_NotifyIconW_orig)
@@ -475,6 +491,8 @@ void Wh_ModUninit() {
     if (hOutlookWnd)
         WindhawkUtils::RemoveWindowSubclassFromAnyThread(hOutlookWnd, OutlookSubclassProc);
     if (g_trayHwnd)
+        WindhawkUtils::RemoveWindowSubclassFromAnyThread(g_trayHwnd, TraySubclassProc);
+    if (g_trayEnvelopeHwnd)
         WindhawkUtils::RemoveWindowSubclassFromAnyThread(g_trayHwnd, TraySubclassProc);
     
     for (IDispatch* pDisp : explorers) {
