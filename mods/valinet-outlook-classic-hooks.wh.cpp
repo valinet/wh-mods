@@ -5,6 +5,7 @@
 // @version         0.1
 // @author          valinet
 // @github          https://github.com/valinet
+// @twitter         https://twitter.com/jack
 // @homepage        https://valinet.ro
 // @include         OUTLOOK.EXE
 // @compilerOptions -lcomctl32 -lole32 -loleaut32 -loleacc -ldwmapi
@@ -17,6 +18,8 @@
 Collection of quality of life improvements for Outlook (classic).
 
 In order to determine names of mail boxes, add some dummy one and then watch mod logs for names of the mailboxes in your setup.
+
+Disable scheduled send/receive for monitored mailboxes in Outlook settings in order for IMAP IDLE to work.
 */
 // ==/WindhawkModReadme==
 
@@ -237,12 +240,10 @@ LRESULT CALLBACK TraySubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
                ((hWnd == g_trayHwnd && uMsg == 1026 && wParam == 0x3039 && lParam == 0x202) ||
                 (hWnd == g_trayEnvelopeHwnd && uMsg == 1068 && wParam == 0 && lParam == 0x202))) {
         //Wh_Log(L"tray callback: uMsg=0x%04X wp=0x%llX lp=0x%llX", uMsg, wParam, lParam);
-        if (IsWindowVisible(hOutlookWnd)) {
+        if (IsWindowVisible(hOutlookWnd))
             ShowWindow(hOutlookWnd, SW_HIDE);
-        } else {
-            ShowWindow(hOutlookWnd, SW_RESTORE);
-            SetForegroundWindow(hOutlookWnd);
-        }
+        else
+            PostMessageW(hOutlookWnd, WM_TIMER, 0x1339, 0);
         return 0;
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
@@ -282,8 +283,7 @@ BOOL WINAPI TrackPopupMenuEx_hook(HMENU hMenu, UINT uFlags, int x, int y,
     if (result == 0x1337) {
         PostMessageW(hOutlookWnd, WM_USER + 0x47, 0, 0x413);
     } else if (result == 65100) {
-        ShowWindow(hOutlookWnd, SW_RESTORE);
-        SetForegroundWindow(hOutlookWnd);
+        PostMessageW(hOutlookWnd, WM_TIMER, 0x1339, 0);
     } else if (result != 0) {
         if (origFlags & TPM_RETURNCMD) {
             return result;
@@ -336,7 +336,7 @@ LRESULT CALLBACK OutlookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
         //ShowWindow(hWnd, SW_SHOW);
     } else if ((uMsg == WM_SYSCOMMAND && wParam  == SC_CLOSE && (InSendMessageEx(nullptr) & ISMEX_SEND)) || (uMsg == WM_USER + 0x47 && lParam == 0x413)) {
         if (uMsg == WM_SYSCOMMAND)
-            ShowWindow(hWnd, SW_RESTORE);
+            ShowWindow(hWnd, SW_SHOW);
         for (IDispatch* pDisp : explorers) {
             if (!pDisp)
                 break;
@@ -379,6 +379,12 @@ LRESULT CALLBACK OutlookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
             UncloakTaskbarWindow(hWnd);
         else
             ShowWindow(hWnd, SW_SHOW);
+    } else if (uMsg == WM_TIMER && wParam == 0x1339) {
+        KillTimer(hWnd, 0x1339);
+        ShowWindow(hWnd, SW_SHOW);
+        if (IsIconic(hWnd))
+            ShowWindow(hWnd, SW_RESTORE);
+        SetForegroundWindow(hWnd);
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
@@ -418,8 +424,7 @@ HRESULT WINAPI RegisterActiveObject_hook(IUnknown* punk, REFCLSID rclsid,
 
 BOOL CALLBACK OMWFind(HWND hWnd, LPARAM lParam) {
     if (GetClassWord(hWnd, GCW_ATOM) == lParam && GetPropW(hWnd, L"OMW")) {
-        ShowWindow(hWnd, SW_RESTORE);
-        SetForegroundWindow(hWnd);
+        PostMessageW(hWnd, WM_TIMER, 0x1339, 0);
         return FALSE;
     }
     return TRUE;
