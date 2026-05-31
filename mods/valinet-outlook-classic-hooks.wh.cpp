@@ -18,6 +18,8 @@
 Collection of quality of life improvements for Outlook (classic).
 
 In order to determine names of mail boxes, add some dummy one and then watch mod logs for names of the mailboxes in your setup.
+
+Disable scheduled send/receive for monitored mailboxes in Outlook settings in order for IMAP IDLE to work.
 */
 // ==/WindhawkModReadme==
 
