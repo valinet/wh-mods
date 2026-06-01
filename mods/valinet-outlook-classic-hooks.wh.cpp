@@ -57,6 +57,7 @@ struct {
 #include <oleacc.h>
 #include <dwmapi.h>
 #include <shobjidl.h>
+#include <netlistmgr.h>
 
 HWND hOutlookWnd = NULL;
 bool registered = false;
@@ -66,6 +67,88 @@ IDispatch* explorers[10]{};
 HWND g_trayHwnd = nullptr;
 HWND g_trayEnvelopeHwnd = nullptr;
 ITaskbarList* pTaskbar = nullptr;
+bool allowNextSwShow = false;
+INetworkListManager* g_pNLM = nullptr;
+IConnectionPoint* g_pCP = nullptr;
+DWORD g_netEventsCookie = 0;
+
+static const IID IID_IUnknown_ = {
+    0x00000000, 0x0000, 0x0000,
+    { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 }
+};
+
+static const IID IID_INetworkListManagerEvents_ = {
+    0xDCB00001, 0x570F, 0x4A9B,
+    { 0x8D, 0x69, 0x19, 0x9F, 0xDB, 0xA5, 0x72, 0x3B }
+};
+
+class NetworkEvents : public INetworkListManagerEvents {
+public:
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (memcmp(&riid, &IID_IUnknown_, sizeof(IID)) == 0 ||
+            memcmp(&riid, &IID_INetworkListManagerEvents_, sizeof(IID)) == 0) {
+            *ppv = this;
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE ConnectivityChanged(NLM_CONNECTIVITY connectivity) override {
+        bool isOnline = (connectivity & NLM_CONNECTIVITY_IPV4_INTERNET) || 
+                        (connectivity & NLM_CONNECTIVITY_IPV6_INTERNET);
+        Wh_Log(L"Connectivity changed: %s", isOnline ? L"online" : L"offline");
+        if (isOnline) {
+            //PostMessageW(hOutlookWnd, WM_TIMER, 0x133A, 0);
+            SetTimer(hOutlookWnd, 0x133B, 20000, NULL);
+        } else {
+            //PostMessageW(hOutlookWnd, WM_TIMER, 0x133C, 0);
+            //KillTimer(hOutlookWnd, 0x133A);
+            //KillTimer(hOutlookWnd, 0x133B);
+        }
+        return S_OK;
+    }
+} g_netEvents;
+
+static const IID IID_INetworkListManager_ = {
+    0xDCB00000, 0x570F, 0x4A9B,
+    { 0x8D, 0x69, 0x19, 0x9F, 0xDB, 0xA5, 0x72, 0x3B }
+};
+static const CLSID CLSID_NetworkListManager_ = {
+    0xDCB00C01, 0x570F, 0x4A9B,
+    { 0x8D, 0x69, 0x19, 0x9F, 0xDB, 0xA5, 0x72, 0x3B }
+};
+
+static const IID IID_IConnectionPointContainer_ = {
+    0xB196B284, 0xBAB4, 0x101A,
+    { 0xB6, 0x9C, 0x00, 0xAA, 0x00, 0x34, 0x1D, 0x07 }
+};
+
+void SetupNetworkNotifications() {
+    if (g_pNLM)
+        return;
+
+    HRESULT hr = CoCreateInstance(CLSID_NetworkListManager_, nullptr, CLSCTX_INPROC_SERVER,
+                     IID_INetworkListManager_, reinterpret_cast<void**>(&g_pNLM));
+    if (!g_pNLM) { Wh_Log(L"Failed to create NetworkListManager: %x", hr); return; }
+
+    VARIANT_BOOL isConnected = VARIANT_FALSE;
+    g_pNLM->IsConnectedToInternet(&isConnected);
+    Wh_Log(L"Currently connected: %d", isConnected);
+
+    IConnectionPointContainer* pCPC = nullptr;
+    g_pNLM->QueryInterface(IID_IConnectionPointContainer_,
+                            reinterpret_cast<void**>(&pCPC));
+    if (!pCPC) { Wh_Log(L"Failed to get CPC"); return; }
+
+    pCPC->FindConnectionPoint(IID_INetworkListManagerEvents_,  &g_pCP);
+    pCPC->Release();
+    if (!g_pCP) { Wh_Log(L"Failed to get CP"); return; }
+
+    hr = g_pCP->Advise(&g_netEvents, &g_netEventsCookie);
+    Wh_Log(L"Network notifications set up, cookie=%d, hr=%x", g_netEventsCookie, hr);
+}
 
 const CLSID CLSID_OutlookApplication = {
     0x0006F03A, 0x0000, 0x0000,
@@ -113,6 +196,83 @@ HRESULT CallMethod(IDispatch* pDisp, LPCOLESTR name,
                        DISPATCH_METHOD, &dp, pResult, nullptr, nullptr);
     if (FAILED(hr)) { Wh_Log(L"CallMethod: Invoke failed for %s: %08X", name, hr); }
     return hr;
+}
+
+void WorkOnline(int& k) {
+    IDispatch* pApp = nullptr;
+    HRESULT hr = GetActiveObject(CLSID_OutlookApplication, nullptr,
+                                 reinterpret_cast<IUnknown**>(&pApp));
+    if (FAILED(hr) || !pApp) { Wh_Log(L"GetActiveObject failed: %08X", hr); return; }
+    Wh_Log(L"Got Outlook Application");
+
+    k = 2;
+
+    VARIANT vSession = {};
+    GetProperty(pApp, L"Session", &vSession);
+    if (vSession.vt == VT_DISPATCH && vSession.pdispVal) {
+        VARIANT vOffline = {};
+        GetProperty(vSession.pdispVal, L"Offline", &vOffline);
+        Wh_Log(L"Offline=%d", vOffline.boolVal);
+        if (vOffline.boolVal)
+            k = 1;
+        vSession.pdispVal->Release();
+    }
+
+    // get ActiveExplorer
+    VARIANT vExplorer = {};
+    if (FAILED(GetProperty(pApp, L"ActiveExplorer", &vExplorer)) ||
+        vExplorer.vt != VT_DISPATCH || !vExplorer.pdispVal) {
+        Wh_Log(L"Failed to get ActiveExplorer");
+        return;
+    }
+    IDispatch* pExplorer = vExplorer.pdispVal;
+
+    // get CommandBars
+    VARIANT vCB = {};
+    if (FAILED(GetProperty(pExplorer, L"CommandBars", &vCB)) ||
+        vCB.vt != VT_DISPATCH || !vCB.pdispVal) {
+        Wh_Log(L"Failed to get CommandBars");
+        pExplorer->Release();
+        return;
+    }
+    IDispatch* pCB = vCB.pdispVal;
+
+    VARIANT vArg = {};
+    vArg.vt = VT_BSTR;
+    vArg.bstrVal = SysAllocString(L"ToggleOnline");
+    hr = CallMethod(pCB, L"ExecuteMso", &vArg, 1, nullptr);
+    Wh_Log(L"ExecuteMso ToggleOnline hr=%08X", hr);
+    SysFreeString(vArg.bstrVal);
+
+    pCB->Release();
+    pExplorer->Release();
+    pApp->Release();
+}
+
+void TriggerSendAndReceive(VARIANT_BOOL visible = VARIANT_FALSE) {
+    IDispatch* pApp = nullptr;
+    HRESULT hr = GetActiveObject(CLSID_OutlookApplication, nullptr,
+                                 reinterpret_cast<IUnknown**>(&pApp));
+    if (FAILED(hr) || !pApp) { Wh_Log(L"GetActiveObject failed: %08X", hr); return; }
+    Wh_Log(L"Got Outlook Application");
+
+    VARIANT vSession = {};
+    if (FAILED(GetProperty(pApp, L"Session", &vSession)) || 
+        vSession.vt != VT_DISPATCH || !vSession.pdispVal) {
+        Wh_Log(L"Failed to get Session");
+        return;
+    }
+    IDispatch* pSession = vSession.pdispVal;
+
+    VARIANT vArg = {};
+    vArg.vt = VT_BOOL;
+    vArg.boolVal = visible;
+
+    hr = CallMethod(pSession, L"SendAndReceive", &vArg, 1, nullptr);
+    Wh_Log(L"SendAndReceive hr=%08X", hr);
+
+    pSession->Release();
+    pApp->Release();
 }
 
 void OpenMailboxInNewWindow(int slot, LPCWSTR accountName) {
@@ -334,9 +494,19 @@ LRESULT CALLBACK OutlookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
         WindhawkUtils::RemoveWindowSubclassFromAnyThread(hWnd, OutlookSubclassProc);
     //} else if (uMsg == WM_WINDOWPOSCHANGED && !(((WINDOWPOS*)lParam)->flags & SWP_HIDEWINDOW)) {
         //ShowWindow(hWnd, SW_SHOW);
+    } else if (uMsg == WM_WINDOWPOSCHANGING) {
+        WINDOWPOS* wp = (WINDOWPOS*)lParam;
+        if (wp->flags & SWP_SHOWWINDOW) {
+            if (allowNextSwShow)
+                allowNextSwShow = false;
+            else
+                wp->flags &= ~SWP_SHOWWINDOW;
+        }
     } else if ((uMsg == WM_SYSCOMMAND && wParam  == SC_CLOSE && (InSendMessageEx(nullptr) & ISMEX_SEND)) || (uMsg == WM_USER + 0x47 && lParam == 0x413)) {
-        if (uMsg == WM_SYSCOMMAND)
+        if (uMsg == WM_SYSCOMMAND) {
+            allowNextSwShow = true;
             ShowWindow(hWnd, SW_SHOW);
+        }
         for (IDispatch* pDisp : explorers) {
             if (!pDisp)
                 break;
@@ -357,6 +527,7 @@ LRESULT CALLBACK OutlookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
         return 0;
     } else if (uMsg == WM_DWMNCRENDERINGCHANGED && !triggered) {
         triggered = true;
+        ShowWindow(hWnd, SW_SHOW);
         SetTimer(hWnd, 0x1338, 2000, 0);
     } else if (uMsg == WM_TIMER && wParam == 0x1337) {
         KillTimer(hWnd, 0x1337);
@@ -369,6 +540,8 @@ LRESULT CALLBACK OutlookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
             OpenMailboxInNewWindow(i, str);
             Wh_FreeStringSetting(str);
         }
+        if (shouldHide)
+            PostMessageW(hOutlookWnd, WM_TIMER, 0x133B, 0);
     } else if (uMsg == WM_TIMER && wParam == 0x1338) {
         KillTimer(hWnd, 0x1338);
         PCWSTR str = Wh_GetStringSetting(L"mbox_monitor[0]");
@@ -377,14 +550,30 @@ LRESULT CALLBACK OutlookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
         Wh_FreeStringSetting(str);
         if (shouldHide)
             UncloakTaskbarWindow(hWnd);
-        else
+        else {
+            allowNextSwShow = true;
             ShowWindow(hWnd, SW_SHOW);
+        }
     } else if (uMsg == WM_TIMER && wParam == 0x1339) {
         KillTimer(hWnd, 0x1339);
+        allowNextSwShow = true;
         ShowWindow(hWnd, SW_SHOW);
         if (IsIconic(hWnd))
             ShowWindow(hWnd, SW_RESTORE);
         SetForegroundWindow(hWnd);
+    } else if (uMsg == WM_TIMER && wParam == 0x133A) {
+        KillTimer(hWnd, 0x133A);
+        int k = 0;
+        WorkOnline(k);
+        //if (k == 2)
+        //    SetTimer(hWnd, 0x133C, 1000, NULL);
+    } else if (uMsg == WM_TIMER && wParam == 0x133C) {
+        KillTimer(hWnd, 0x133C);
+        int k = 0;
+        WorkOnline(k);
+    } else if (uMsg == WM_TIMER && wParam == 0x133B) {
+        KillTimer(hWnd, 0x133B);
+        TriggerSendAndReceive();
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
@@ -399,6 +588,7 @@ HWND CreateWindowExW_hook(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR lpWindow
         SetPropW(hOutlookWnd, L"OMW", hOutlookWnd);
         if (shouldHide)
             CloakTaskbarWindow(hOutlookWnd);
+        SetupNetworkNotifications();
     }
     if (HIWORD((ULONG_PTR)lpClassName) && !wcscmp(lpClassName, L"MsoSplash") && shouldHide) {
         CloakTaskbarWindow(hWnd);
@@ -508,6 +698,13 @@ void Wh_ModUninit() {
 
     if (pTaskbar)
         pTaskbar->Release();
+
+    if (g_pCP && g_netEventsCookie)
+        g_pCP->Unadvise(g_netEventsCookie);
+    if (g_pCP)
+        g_pCP->Release();
+    if (g_pNLM)
+        g_pNLM->Release();
 }
 
 void Wh_ModSettingsChanged() {
